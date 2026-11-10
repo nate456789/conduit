@@ -172,8 +172,15 @@ final class ChatSendPlaceholderHandle {
     }
     final owner = _ownerConversationId;
     if (owner == null) return conversation == null;
-    return conversation != null &&
-        chatMutationOwnerScopeForConversation(conversation) == owner;
+    if (conversation == null) return false;
+    // A Direct turn is bound to its run owner: the chat id named by the store
+    // and auth session that persisted it, which a stored conversation's plain
+    // scope does not carry. Only the Direct layer can recompute it.
+    if (owner.startsWith(_directStoredRunOwnerPrefix) ||
+        owner.startsWith(_directRuntimeRunOwnerScopePrefix)) {
+      return _conversationMatchesDirectRunOwner(ref, conversation, owner);
+    }
+    return chatMutationOwnerScopeForConversation(conversation) == owner;
   }
 }
 

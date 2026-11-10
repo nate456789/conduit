@@ -158,4 +158,68 @@ void main() {
     await send;
     check(steps).deepEquals(['placeholder', 'started']);
   });
+
+  // The composer hands over its words when the handle says the turn is in the
+  // chat on screen. A Direct turn's owner is its stored run owner, not the
+  // plain conversation scope, so a finished Direct turn never said so.
+  test('a finished Direct send still owns the chat it went into', () async {
+    final adapter = _WaitingAdapter();
+    final profile = DirectConnectionProfile(
+      id: 'profile-one',
+      name: 'Local provider',
+      adapterKey: kOllamaAdapterKey,
+      baseUrl: 'http://localhost:11434',
+    );
+    final models = DirectModelRegistry();
+    final model = models
+        .replaceProfileModels(profile, [DirectRemoteModel(id: 'model-one')])
+        .single;
+    final container = ProviderContainer(
+      overrides: [
+        openWebUiDatabaseAccessProvider.overrideWith(_OpenDatabaseAccess.new),
+        directLocalDatabaseProvider.overrideWith((ref) {
+          final database = AppDatabase(NativeDatabase.memory());
+          ref.onDispose(() => unawaited(database.close()));
+          return database;
+        }),
+        apiServiceProvider.overrideWithValue(null),
+        socketServiceProvider.overrideWithValue(null),
+        selectedModelProvider.overrideWithValue(model),
+        reviewerModeProvider.overrideWithValue(false),
+        directConnectionProfilesProvider.overrideWith(
+          () => _FixedProfiles(profile),
+        ),
+        directModelRegistryProvider.overrideWithValue(models),
+        directRunRegistryProvider.overrideWithValue(DirectRunRegistry()),
+        directProviderAdapterRegistryProvider.overrideWithValue(
+          DirectProviderAdapterRegistry([adapter]),
+        ),
+        webSearchEnabledProvider.overrideWith(_NoWebSearch.new),
+        imageGenerationEnabledProvider.overrideWith(_NoImageGeneration.new),
+        codeInterpreterEnabledProvider.overrideWith(_NoCodeInterpreter.new),
+      ],
+    );
+    addTearDown(container.dispose);
+
+    ChatSendPlaceholderHandle? handle;
+    final send = durableSend(
+      container,
+      'Summarize the synthetic notes',
+      null,
+      onAssistantPlaceholderCreated: (created) => handle = created,
+      onTurnStarted: () {},
+    );
+    for (var turn = 0; turn < 200 && adapter.runs == 0; turn++) {
+      await pumpEventQueue();
+    }
+    adapter.events
+      ..add(const DirectContentDelta('Done.'))
+      ..add(const DirectStreamDone());
+    await adapter.finish();
+    await send;
+
+    final active = container.read(activeConversationProvider);
+    check(active?.id).isNotNull();
+    check(handle!.ownsActiveChat(container)).isTrue();
+  });
 }

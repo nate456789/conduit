@@ -357,6 +357,7 @@ void _requireDirectLocationAuthSession(
 }
 
 const String _directStoredRunOwnerPrefix = 'conduit-direct-store://';
+const String _directRuntimeRunOwnerScopePrefix = 'conduit-direct-runtime://';
 final Expando<bool> _knownManagedDirectDatabases = Expando<bool>(
   'known-managed-direct-databases',
 );
@@ -467,9 +468,10 @@ bool _conversationMatchesDirectRunOwner(
   Conversation conversation,
   String ownerConversationId,
 ) {
-  const runtimePrefix = 'conduit-direct-runtime://';
-  if (ownerConversationId.startsWith(runtimePrefix)) {
-    final encoded = ownerConversationId.substring(runtimePrefix.length);
+  if (ownerConversationId.startsWith(_directRuntimeRunOwnerScopePrefix)) {
+    final encoded = ownerConversationId.substring(
+      _directRuntimeRunOwnerScopePrefix.length,
+    );
     String rawId;
     try {
       rawId = Uri.decodeComponent(encoded);

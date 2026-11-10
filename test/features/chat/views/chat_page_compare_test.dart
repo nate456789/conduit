@@ -12,10 +12,13 @@ import 'package:conduit_core/database/chat_database_repository.dart';
 import 'package:conduit_core/database/database_provider.dart';
 import 'package:conduit_core/features/auth/providers/unified_auth_providers.dart';
 import 'package:conduit_core/features/chat/providers/chat_providers.dart';
+import 'package:conduit_core/features/direct_connections/models/direct_completion.dart';
 import 'package:conduit_core/features/direct_connections/models/direct_connection_profile.dart';
 import 'package:conduit_core/features/direct_connections/models/direct_remote_model.dart';
 import 'package:conduit_core/features/direct_connections/providers/direct_connection_providers.dart';
 import 'package:conduit_core/features/direct_connections/services/direct_model_registry.dart';
+import 'package:conduit_core/features/direct_connections/services/direct_provider_adapter.dart';
+import 'package:conduit_core/features/direct_connections/services/direct_run_registry.dart';
 import 'package:conduit_core/features/hermes/models/hermes_chat_input.dart';
 import 'package:conduit_core/features/hermes/models/hermes_config.dart';
 import 'package:conduit_core/features/hermes/models/hermes_model.dart';
@@ -88,6 +91,9 @@ void main() {
     bool newChat = false,
     bool reviewer = false,
     Model? model,
+    Conversation? activeChat,
+    List<DirectConnectionProfile> directProfiles =
+        const <DirectConnectionProfile>[],
     List<Override> overrides = const <Override>[],
   }) async {
     final originalErrorWidgetBuilder = ErrorWidget.builder;
@@ -134,7 +140,7 @@ void main() {
         reviewerModeProvider.overrideWithValue(reviewer),
         selectedModelProvider.overrideWith(() => _Selected(model)),
         activeConversationProvider.overrideWith(
-          () => _Active(newChat ? null : chat),
+          () => _Active(activeChat ?? (newChat ? null : chat)),
         ),
         chatMessagesProvider.overrideWith(_Messages.new),
         optimizedStorageServiceProvider.overrideWithValue(_Storage()),
@@ -146,7 +152,9 @@ void main() {
         toolsListProvider.overrideWith(_Tools.new),
         comparisonCommandAvailableProvider.overrideWithValue(true),
         personalizationSettingsProvider.overrideWith(_Personalization.new),
-        directConnectionProfilesProvider.overrideWith(_NoProfiles.new),
+        directConnectionProfilesProvider.overrideWith(
+          () => _SomeProfiles(directProfiles),
+        ),
         currentUserProvider2.overrideWithValue(
           const User(
             id: 'me',
@@ -354,6 +362,75 @@ void main() {
     expect(hermes.turns, 0);
     expect(composerText(tester), 'compare this');
   });
+
+  // A Direct connection runs its turn on a local provider, and its send
+  // handle is bound to the run owner that persisted the turn: a wider scope
+  // than the chat's own. The composer checks that handle before it lets go of
+  // the words it just sent, so a chat that stays put has to answer to it.
+  testWidgets('a Direct connection send clears its draft', (tester) async {
+    final db = AppDatabase(NativeDatabase.memory());
+    final localDb = AppDatabase(NativeDatabase.memory());
+    final profile = DirectConnectionProfile(
+      id: 'local-provider',
+      name: 'Local provider',
+      adapterKey: kOllamaAdapterKey,
+      baseUrl: 'http://localhost:11434',
+    );
+    final registry = DirectModelRegistry();
+    final adapter = _AnsweringDirectAdapter();
+    final model = registry
+        .replaceProfileModels(profile, [DirectRemoteModel(id: 'model-one')])
+        .single;
+    // An on-device chat the user was already in: the send stays where it is,
+    // so nothing else sweeps the composer behind the send's back.
+    final chat = withChatStorageProvenance(
+      Conversation(
+        id: 'direct-chat',
+        title: 'A local chat',
+        createdAt: DateTime.utc(2026, 7, 13),
+        updatedAt: DateTime.utc(2026, 7, 13),
+      ),
+      ChatStorageKind.directLocal,
+    );
+    await tester.runAsync(
+      () => localDb
+          .into(localDb.chats)
+          .insert(
+            ChatsCompanion.insert(
+              id: 'direct-chat',
+              title: 'A local chat',
+              createdAt: 1,
+              updatedAt: 1,
+              bodySynced: const Value(true),
+            ),
+          ),
+    );
+    await compareOnPage(
+      tester,
+      db: db,
+      ordinarySend: true,
+      model: model,
+      directProfiles: [profile],
+      activeChat: chat,
+      overrides: [
+        directModelRegistryProvider.overrideWithValue(registry),
+        // No discovery prunes the local model's binding.
+        directModelDiscoveryProvider.overrideWith(_IdleDirectDiscovery.new),
+        directRunRegistryProvider.overrideWithValue(DirectRunRegistry()),
+        directProviderAdapterRegistryProvider.overrideWithValue(
+          DirectProviderAdapterRegistry([adapter]),
+        ),
+        directLocalDatabaseProvider.overrideWith((ref) {
+          ref.onDispose(() => unawaited(localDb.close()));
+          return localDb;
+        }),
+      ],
+    );
+
+    // The turn reached the local provider, so this is a send that ran.
+    expect(adapter.runs, 1);
+    expect(composerText(tester), isEmpty);
+  });
 }
 
 class _Conversations extends Conversations {
@@ -443,6 +520,46 @@ class _NoNewSessionDesktopApi extends HermesApiService
   }
 }
 
+/// A Direct provider that answers at once, standing in for a local model.
+class _AnsweringDirectAdapter implements DirectProviderAdapter {
+  int runs = 0;
+
+  @override
+  String get key => kOllamaAdapterKey;
+
+  @override
+  Future<List<DirectRemoteModel>> listModels(
+    DirectConnectionProfile profile,
+  ) async => const [];
+
+  @override
+  Future<DirectConnectionProbe> probe(DirectConnectionProfile profile) async =>
+      const DirectConnectionProbe(reachable: true);
+
+  @override
+  DirectCompletionRun startCompletion(
+    DirectConnectionProfile profile,
+    DirectCompletionRequest request,
+  ) {
+    runs++;
+    final events = StreamController<DirectStreamEvent>();
+    final done = Completer<void>();
+    events
+      ..add(const DirectContentDelta('The synthetic answer.'))
+      ..add(const DirectStreamDone());
+    done.complete();
+    unawaited(events.close());
+    return DirectCompletionRun(
+      id: 'run-one',
+      profileId: profile.id,
+      remoteModelId: request.remoteModelId,
+      events: events.stream,
+      cancelToken: CancelToken(),
+      done: done.future,
+    );
+  }
+}
+
 class _Active extends ActiveConversationNotifier {
   _Active(this.initial);
 
@@ -479,9 +596,13 @@ class _IdleDirectDiscovery extends DirectModelDiscoveryController {
       DirectModelDiscoveryState();
 }
 
-class _NoProfiles extends DirectConnectionProfilesController {
+class _SomeProfiles extends DirectConnectionProfilesController {
+  _SomeProfiles(this.profiles);
+
+  final List<DirectConnectionProfile> profiles;
+
   @override
-  Future<List<DirectConnectionProfile>> build() async => const [];
+  Future<List<DirectConnectionProfile>> build() async => profiles;
 }
 
 /// Answers the settings read an admission makes, without a network.

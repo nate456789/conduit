@@ -343,6 +343,33 @@ void main() {
     },
   );
 
+  composerTest('an ordinary send into a chat the user was already in clears '
+      'the field once the turn is admitted', (tester) async {
+    late ProviderContainer container;
+    container = await pump(
+      tester,
+      draftHost: (text, onPrepared) async {
+        ChatSendPlaceholderHandle? committed;
+        await durableSend(
+          container,
+          text,
+          null,
+          onAssistantPlaceholderCreated: (handle) {
+            onPrepared(handle);
+            committed = handle;
+          },
+        );
+        return committed;
+      },
+    );
+    await tester.enterText(find.byType(TextField), 'What year did it begin?');
+    await tester.pump();
+    await tester.tap(find.byKey(const ValueKey('primary-btn-send')));
+    await settle(tester);
+
+    expect(composerText(tester), isEmpty);
+  });
+
   composerTest('no caret blinks in the field while the + panel stands in '
       'for the keyboard', (tester) async {
     await pump(tester);
